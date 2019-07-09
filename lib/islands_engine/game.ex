@@ -1,16 +1,25 @@
 defmodule IslandsEngine.Game do
-  # 
+  # configure the child specification
   use GenServer, start: {__MODULE__, :start_link, []}, restart: :transient
   alias IslandsEngine.{Board, Coordinate, Guesses, Island, Rules}
 
   @players [:player1, :player2]
+  @timeout 60 * 60 * 24 * 1000
 
   # Server Callbacks
 
+  # send a message to calculate the initial state and return a fresh one to avoid
+  # blocking the caller
   def init(name) do
+    send(self(), {:set_state, name})
+    # A timeout isn't necessary here. We are sending a message already. No chance for a timeout
+    {:ok, fresh_state(name)}
+  end
+
+  defp fresh_state(name) do
     player1 = %{name: name, board: Board.new(), guesses: Guesses.new()}
     player2 = %{name: nil, board: Board.new(), guesses: Guesses.new()}
-    {:ok, %{player1: player1, player2: player2, rules: %Rules{}}}
+    %{player1: player1, player2: player2, rules: %Rules{}}
   end
 
   def handle_call({:add_player, name}, _from, state) do
@@ -87,6 +96,29 @@ defmodule IslandsEngine.Game do
     end
   end
 
+  def handle_info(:timeout, state) do
+    {:stop, {:shutdown, :timeout}, state}
+  end
+
+  # To avoid blocking start_game/1 waiting for init/1 to complete
+  def handle_info({:set_state, name}, _state) do
+    initial_state =
+      case :ets.lookup(:game_state, name) do
+        [] -> fresh_state(name)
+        [{_key, state}] -> state
+      end
+
+    :ets.insert(:game_state, {name, initial_state})
+    {:noreply, initial_state, @timeout}
+  end
+
+  def terminate({:shutdown, :timeout}, state) do
+    :ets.delete(:game_state, state.player1.name)
+    :ok
+  end
+
+  def terminate(_reason, _state), do: :ok
+
   defp update_player2_name(state, name) do
     put_in(state.player2.name, name)
   end
@@ -97,7 +129,10 @@ defmodule IslandsEngine.Game do
     Map.update!(state, player, fn player -> %{player | board: board} end)
   end
 
-  defp reply_success(state, reply), do: {:reply, reply, state}
+  defp reply_success(state, reply) do
+    :ets.insert(:game_state, {state.player1.name, state})
+    {:reply, reply, state, @timeout}
+  end
 
   defp player_board(state, player) do
     Map.get(state, player).board
